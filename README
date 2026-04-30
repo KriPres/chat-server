@@ -1,0 +1,297 @@
+================================================================================
+CS 214 - Project 4: A Simple Chat Server
+================================================================================
+
+AUTHORS
+-------
+Name:  Krishaan Chaudhary           NetID: kac551
+Name:  Aryaman Mishra               NetID: am4021
+
+================================================================================
+HOW TO BUILD AND RUN
+================================================================================
+
+REQUIREMENTS
+------------
+    - GCC compiler (tested on iLab with gcc)
+    - GNU Make
+    - All source files in the same directory
+
+BUILDING
+--------
+To compile, run:
+
+    make
+
+This produces the following executables:
+
+    chatd        — the chat server
+    test_client  — the automated test harness
+
+To remove all compiled files and start fresh:
+
+    make clean
+
+
+RUNNING THE SERVER
+------------------
+    ./chatd <port>
+
+Example:
+
+    ./chatd 19234
+
+The server will listen indefinitely on the given port. Use a port above
+1024 to avoid permission issues. On shared machines like iLab, pick a
+high port (e.g. 19234) to avoid collisions with other users.
+
+
+CONNECTING CLIENTS
+------------------
+Using the provided sample client:
+
+    ./clients/client <name> <host> <port>
+
+Example (open two terminals):
+
+    ./clients/client Alice 127.0.0.1 19234
+    ./clients/client Bob   127.0.0.1 19234
+
+Client commands:
+    <message>          send a message to everyone
+    /<status>          set your status
+    ?                  query all users and their statuses
+    ?<name>            query a specific user
+    @<name> <message>  send a private message
+
+
+RUNNING THE TEST SUITE
+----------------------
+    ./chatd 19234 &
+    ./test_client 127.0.0.1 19234
+
+Runs 15 automated protocol-level tests and prints PASS/FAIL for each,
+with a final score at the bottom.
+
+================================================================================
+DESIGN NOTES
+================================================================================
+
+OVERVIEW
+--------
+chatd is a multithreaded TCP chat server. The main thread accepts incoming
+connections in a loop; each accepted connection is handed off to a newly
+spawned, detached client thread. A global clients[] array protected by a
+single mutex tracks every connected, named user.
+
+FILES + PURPOSES
+----------------
+
+================================================================================
+FILE: chatd.c
+================================================================================
+
+Purpose: entry point. Parses the port argument, creates the listening socket
+with SO_REUSEADDR, and runs the accept loop. For each incoming connection:
+
+    1. Finds a free slot in the clients[] table under the mutex.
+    2. Stores the new fd and clears the name/status fields.
+    3. Allocates a slot index on the heap and passes it to a new detached
+       pthread, then releases it.
+
+================================================================================
+FILE: client.c
+================================================================================
+
+Purpose: implements client_thread() and all message handlers. Each thread
+owns one connection for its lifetime. Structured in the following stages:
+
+    1. valid_name:       checks that a screen name contains only letters,
+                         digits, hyphens, and underscores.
+
+    2. valid_printable:  checks that a string contains only characters in
+                         the range 32-126 (printable ASCII).
+
+    3. broadcast_locked: sends a MSG to every named client. Must be called
+                         with clients_mutex held.
+
+    4. client_thread:    main per-client loop. Calls read_message() in a
+                         loop and dispatches on the message type:
+
+                         NAM — validates the name, checks for duplicates
+                               under the mutex, registers the user, sends
+                               the welcome message.
+
+                         SET — validates and stores the status. If non-empty,
+                               broadcasts the status change to #all.
+
+                         MSG — parses sender/recip/body fields. Validates
+                               body length and characters. Broadcasts to
+                               #all or unicasts to the named recipient.
+
+                         WHO — builds a response string using open_memstream.
+                               For #all, lists every named user with status.
+                               For a specific name, reports their status or
+                               "No status".
+
+    5. disconnect:       checks clients[slot].fd == fd before clearing the
+                         slot (guards against a slow thread racing with a
+                         newly accepted client that reused the slot). Closes
+                         the fd and broadcasts the departure message.
+
+================================================================================
+FILE: proto.c
+================================================================================
+
+Purpose: protocol I/O. Implements the wire format 1|<TYPE>|<BODYLEN>|<BODY|.
+
+    1. read_exact:    reads exactly n bytes from a fd, retrying on short reads.
+
+    2. read_message:  reads one complete protocol message. Parses the version,
+                      type, and body-length fields byte-by-byte (reading up to
+                      each '|'), then bulk-reads exactly BODYLEN bytes. Sends
+                      ERR 0 and returns 0 on any protocol violation.
+
+    3. send_msg:      formats and writes a 1|MSG|...|  frame.
+
+    4. send_err:      formats and writes a 1|ERR|...|  frame.
+
+================================================================================
+FILES: proto.h, client.h
+================================================================================
+
+    proto.h  — protocol constants (MAX_NAME, MAX_STATUS, MAX_MSG) and
+               declarations for read_message, send_msg, send_err.
+
+    client.h — Client struct definition, MAX_CLIENTS, extern declarations
+               for the global clients[] table and clients_mutex, and the
+               client_thread prototype.
+
+================================================================================
+ALGORITHM: client_thread main loop
+================================================================================
+
+    Step 1: Save fd and slot index. Set named = 0.
+
+    Step 2: Call read_message(). On EOF or IO error, go to disconnect.
+
+    Step 3: If type is NAM:
+        - Validate name characters and length.
+        - Acquire mutex, check for duplicates, register name, release mutex.
+        - Send welcome MSG. Set named = 1. Loop.
+
+    Step 4: If not yet named and type is not NAM, send ERR 0 and disconnect.
+
+    Step 5: If type is SET:
+        - Validate status characters and length.
+        - Acquire mutex, store status, broadcast if non-empty, release mutex.
+
+    Step 6: If type is MSG:
+        - Parse body into sender (ignored), recip, message fields.
+        - Validate message characters and length.
+        - Acquire mutex. Broadcast to #all or unicast to named recipient.
+        - Release mutex.
+
+    Step 7: If type is WHO:
+        - Acquire mutex. Build response with open_memstream.
+        - Send MSG back to the querying client. Release mutex.
+
+    Step 8: On unknown type, send ERR 0 and disconnect.
+
+    Step 9 (disconnect): Acquire mutex. If clients[slot].fd == fd, clear the
+        slot and broadcast departure. Release mutex. Close fd.
+
+================================================================================
+TEST PLAN
+================================================================================
+
+Testing was performed with test_client.c, an automated harness that opens
+fresh TCP connections for each test case and uses a 3-second per-read
+timeout to catch hangs. All 34 assertions pass against chatd on iLab.
+
+Additional manual testing was done using the provided sample client binary
+with three simultaneous users (Alice, Bob, Carol) to verify broadcasts,
+private messages, status updates, WHO queries, and departure announcements.
+
+T1  NAM welcome
+    A new client sends a valid NAM. Server replies with MSG containing
+    "Welcome".
+
+T2  Duplicate name (ERR 1)
+    Two clients attempt to use the same screen name. The second receives
+    ERR with code 1.
+
+T3  Illegal character in name (ERR 3)
+    NAM with a '!' in the name is rejected with ERR code 3.
+
+T4  Name too long (ERR 4)
+    NAM with a 33-character name is rejected with ERR code 4.
+
+T5  SET broadcasts to room
+    Client sets a non-empty status. Both the setter and an observer
+    receive a MSG from #all announcing the new status.
+
+T6  MSG to #all forwarded
+    A message sent to #all is forwarded to all named clients with the
+    correct sender field filled in by the server.
+
+T7  Private MSG
+    A message sent to a specific user is delivered only to that user
+    with the correct sender field. The third user does not receive it.
+
+T8  MSG to unknown recipient (ERR 2)
+    Sending to a name not currently in the chat returns ERR code 2.
+
+T9  WHO <user> with status
+    Querying a user who has set a status returns "name: status".
+
+T10 WHO #all
+    Querying #all returns a newline-separated list of all named clients
+    with their statuses.
+
+T11 Bad protocol version (ERR 0)
+    A message with version "9" is rejected with ERR code 0 (fatal).
+
+T12 WHO unknown user (ERR 2)
+    Querying a name not in the chat returns ERR code 2.
+
+T13 SET empty status suppresses broadcast
+    SET with an empty body does not broadcast. Subsequent WHO reports
+    "No status".
+
+T14 MSG body too long (ERR 4)
+    An 81-character message body (over the 80-char limit) is rejected
+    with ERR code 4.
+
+T15 SET status too long (ERR 4)
+    A 65-character status (over the 64-char limit) is rejected with
+    ERR code 4.
+
+================================================================================
+ERROR HANDLING
+================================================================================
+
+    1. ERR 0 (unreadable) is fatal — the server closes the connection after
+       sending it. ERR 1-4 are recoverable; the server waits for the client
+       to send a corrected message.
+
+    2. Unknown message types send ERR 0 and close the connection.
+
+    3. Malformed MSG bodies (missing field separators) send ERR 0 and close
+       the connection.
+
+    4. If the server is full (128 clients), the new connection receives ERR 0
+       and is closed immediately.
+
+    5. If a client sends any message type other than NAM before completing
+       registration, the server sends ERR 0 and closes the connection.
+
+================================================================================
+KNOWN LIMITATIONS
+================================================================================
+
+    1. A maximum of 128 simultaneous clients is supported (MAX_CLIENTS).
+
+    2. The server does not support multiple rooms — all users are in #all.
+
+    3. WHO #all lists users in no particular order, as the spec permits.
