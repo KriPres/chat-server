@@ -287,7 +287,7 @@ ERROR HANDLING
        registration, the server sends ERR 0 and closes the connection.
 
 ================================================================================
-KNOWN LIMITATIONS
+KNOWN LIMITATIONS + ASSUMPTIONS
 ================================================================================
 
     1. A maximum of 128 simultaneous clients is supported (MAX_CLIENTS).
@@ -295,3 +295,11 @@ KNOWN LIMITATIONS
     2. The server does not support multiple rooms — all users are in #all.
 
     3. WHO #all lists users in no particular order, as the spec permits.
+
+    4. In case a recipient name has illegal characters, we don't even bother to
+       commit to the operation of getting lock, checking our array of clients, and determining
+       no client existing. We simply return that client name has an illegal character. Given the 
+       wording of the project description, error code 2 (inactive screen name) or 
+       3 (invalid character) both seem justifiable, but we stuck with error code 3.
+    
+    5. If we receive an unknown message type, we default to error code 0.

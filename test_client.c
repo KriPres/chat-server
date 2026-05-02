@@ -22,33 +22,47 @@
 #include <sys/time.h>
  
 // connect to host:port, set a 3s receive timeout, return fd
+
+// static method that connects to host at a particular port
 static int connect_to(const char *host, int port)
-{
+{   
+    // set up address hints
     struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM };
+
+    // convert port to string
     char portstr[16];
     snprintf(portstr, sizeof(portstr), "%d", port);
+
+    // handle resolution failure
     struct addrinfo *res;
     if (getaddrinfo(host, portstr, &hints, &res) != 0) {
         return -1;
     }
+
+    // create socket; handle error if error
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) { 
         freeaddrinfo(res); 
         return -1; 
     }
+
+    // connect to socket; handle error if error; close, free, and return
     if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
         close(fd); freeaddrinfo(res); 
         return -1; 
     }
+
     // 3-second receive timeout so tests never hang forever
-    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
+    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 }; // read blocked longer than 3 seconds
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     freeaddrinfo(res);
     return fd;
 }
- 
+
+// helper function that directly sends message to socket/file descriptor
 static void send_raw(int fd, const char *msg) { write(fd, msg, strlen(msg)); }
  
+// helper function that returns how many bytes it processed successfully
 static int recv_exact(int fd, char *buf, int n) {
     int got = 0;
     while (got < n) {
@@ -67,7 +81,7 @@ static int recv_message(int fd, char *type_out, char *buf, int buflen)
 {
     int pos;
  
-    // version field
+    // extract version field
     pos = 0;
     for (;;) {
         char c;
@@ -82,7 +96,7 @@ static int recv_message(int fd, char *type_out, char *buf, int buflen)
         }
     }
  
-    // type field
+    // extract type field
     pos = 0;
     for (;;) {
         char c;
@@ -99,7 +113,7 @@ static int recv_message(int fd, char *type_out, char *buf, int buflen)
         type_out[pos++] = c;
     }
  
-    // length field
+    // extract length field
     char lenstr[12]; int lpos = 0;
     for (;;) {
         char c;
@@ -114,24 +128,34 @@ static int recv_message(int fd, char *type_out, char *buf, int buflen)
         }
         lenstr[lpos++] = c;
     }
+
+    // convert length to integer
     lenstr[lpos] = '\0';
     int blen = atoi(lenstr);
     if (blen < 0 || blen >= buflen) {
         return -1;
     }
- 
+    
+    // try to read exactly blen bytes from buffer
     if (recv_exact(fd, buf, blen) != blen) {
         return -1;
     }
+
     buf[blen] = '\0';
     return blen;
 }
  
-// test counters
+// test counters - static variables
 static int tests_run = 0, tests_pass = 0;
- 
+
+// static method to check if a test passed or failed
 static void check_contains(const char *desc, const char *buf, const char *needle) {
+
+    // increment global number of tests_run
     tests_run++;
+
+    // returns pointer to "needle" : desired target string if found; NULL otherwise
+    // print test pass or fail
     if (strstr(buf, needle)) {
         printf(" PASS: %s\n", desc); tests_pass++;
     } 
@@ -139,7 +163,8 @@ static void check_contains(const char *desc, const char *buf, const char *needle
         printf(" FAIL: %s\n expected to contain: [%s]\n got: [%s]\n", desc, needle, buf);
     }
 }
- 
+
+// helper method to check correct message type based on description, got, and expected strings
 static void check_type(const char *desc, const char *got, const char *expected) {
     tests_run++;
     if (strcmp(got, expected) == 0) {
@@ -156,16 +181,25 @@ static int drain_until_welcome(int fd) {
     char t[4], b[4096];
     int saw_welcome = 0;
  
-    // phase 1: wait up to 3s per message until we see Welcome
+    // phase 1: wait until we see Welcome
     for (int i = 0; i < 20 && !saw_welcome; i++) {
+        
+
+        // receive message
         int r = recv_message(fd, t, b, sizeof(b));
+
+        // return -1 if error
         if (r < 0) {
             return -1;
         }
+
+        // if message type, which is stored in t is type MSG and Welcome appears in b, set saw_welcome flag to true
         if (strcmp(t, "MSG") == 0 && strstr(b, "Welcome")){
             saw_welcome = 1;
         }
     }
+
+    // return -1 if didn't see welcome
     if (!saw_welcome) {
         return -1;
     }
@@ -180,7 +214,7 @@ static int drain_until_welcome(int fd) {
         } // timeout means queue is clean
     }
  
-    // restore normal 3s timeout
+    // restore normal 3s timeout; cleanup completed successfully
     tv.tv_sec = 3; tv.tv_usec = 0;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     return 0;
@@ -196,9 +230,13 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Usage: %s <host> <port>\n", argv[0]);
         return 1;
     }
+
+    // first argument is host (assuming program executable is zeroth argument)
+    // second argument is port
     const char *host = argv[1];
     int port = atoi(argv[2]);
- 
+    
+    // buffers to store type and body of message
     char type[4], body[65536];
  
     // T1: NAM → Welcome
